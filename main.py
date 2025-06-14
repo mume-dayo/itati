@@ -231,7 +231,7 @@ def run_flask():
 
 async def main():
     if not BOT_TOKEN:
-        print("エラー: BOT_TOKENが設定されていません。config.jsonにbot_tokenを追加してください。")
+        print("エラー: BOT_TOKENが設定されていません。環境変数としてBOT_TOKENを設定してください。")
         return
     
     # Flask サーバーを別スレッドで起動
