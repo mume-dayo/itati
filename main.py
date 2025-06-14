@@ -8,7 +8,11 @@ import threading
 import asyncio
 
 # Bot configuration
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    print("❌ エラー: BOT_TOKENが設定されていません。")
+    print("Secretsでkey=BOT_TOKEN, value=あなたのボットトークンを設定してください。")
+    exit(1)
 
 # In-memory data storage
 support_data = {
@@ -377,10 +381,6 @@ def run_web_server():
     app.run(host="0.0.0.0", port=port, debug=False)
 
 async def main():
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKENが設定されていません。環境変数を確認してください。")
-        return
-    
     # Start web server in background
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
