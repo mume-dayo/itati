@@ -1,234 +1,255 @@
-
 import discord
 from discord.ext import commands
-import asyncio
+from discord import app_commands
+import json
 import os
-from threading import Thread
-from flask import Flask
+from typing import Optional
+from flask import Flask, render_template_string
+import threading
+# メモリ上で管理するデータ
+config = {
+    "allowed_user_ids": []
+}
 
-# Botのintents設定
+ticket_data = {
+    "items": [],
+    "open_message": {}
+}
+
+allowed_user_ids = config.get("allowed_user_ids", [])
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+
+def load_data():
+    return ticket_data
+
+def save_data(data):
+    ticket_data.update(data)
+
+class OpenMessageModal(discord.ui.Modal, title="オープンメッセージを設定"):
+    def __init__(self, callback):
+        super().__init__()
+        self.callback_func = callback
+        self.add_item(discord.ui.TextInput(label="タイトル", custom_id="title", required=True))
+        self.add_item(discord.ui.TextInput(label="説明", custom_id="description", style=discord.TextStyle.paragraph, required=True))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        title = self.children[0].value
+        description = self.children[1].value
+        await self.callback_func(interaction, title, description)
+
+class TicketSelect(discord.ui.Select):
+    def __init__(self, options, items, staff_role):
+        self.items = items
+        self.staff_role = staff_role
+        super().__init__(placeholder="ご要件を選択してください", options=options, custom_id="ticket_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_value = self.values[0]
+        item = next((i for i in self.items if i["value"] == selected_value), None)
+        if not item:
+            await interaction.response.send_message("エラー：項目が見つかりませんでした。", ephemeral=True)
+            return
+
+        category = interaction.guild.get_channel(item["category"])
+        if not category or not isinstance(category, discord.CategoryChannel):
+            await interaction.response.send_message("カテゴリが存在しないか無効です。", ephemeral=True)
+            return
+
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            self.staff_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+
+        channel_name = f"🎫｜{interaction.user.name}"
+        ticket_channel = await interaction.guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites)
+
+        data = load_data()
+        open_msg = data.get("open_message", {})
+
+        # メンション
+        await ticket_channel.send(f"{interaction.user.mention} {self.staff_role.mention}")
+
+        # 埋め込みメッセージ
+        embed = discord.Embed(
+            title="内容: " + item["label"],
+            description=open_msg.get("description", "オープンメッセージが設定されていません。"),
+            color=discord.Color.green()
+        )
+        await ticket_channel.send(embed=embed)
+
+        # 削除ボタン
+        await ticket_channel.send(view=DeleteTicketButton())
+
+        # セレクトメニューをリセット
+        new_view = TicketView(self.items, self.staff_role)
+        await interaction.message.edit(view=new_view)
+
+        await interaction.response.send_message(f"{ticket_channel.mention} チャンネルを作成しました。", ephemeral=True)
+
+class DeleteTicketButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="チケットを削除", style=discord.ButtonStyle.danger, custom_id="delete_ticket_btn")
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.channel.delete()
+
+class TicketView(discord.ui.View):
+    def __init__(self, items, staff_role: discord.Role):
+        super().__init__(timeout=None)
+        options = [
+            discord.SelectOption(
+                label=item["label"],
+                value=item["value"],
+                emoji=item["emoji"],
+                description=item["description"]
+            ) for item in items
+        ]
+        self.add_item(TicketSelect(options, items, staff_role))
+
+class Ticket(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @app_commands.command(name="ticket_add", description="チケット項目を追加")
+    async def ticket_add(self, interaction: discord.Interaction, label: str, description: str, category: discord.CategoryChannel, emoji: str):
+        data = load_data()
+        data["items"].append({
+            "label": label,
+            "value": label,
+            "description": description,
+            "category": category.id,
+            "emoji": emoji
+        })
+        save_data(data)
+        await interaction.response.send_message(f"項目「{label}」を追加しました。", ephemeral=True)
+
+    @app_commands.command(name="ticket_setting", description="チケット設定（削除・オープンメッセージ）")
+    async def ticket_setting(self, interaction: discord.Interaction):
+        data = load_data()
+        if not data["items"]:
+            await interaction.response.send_message("項目が登録されていません。", ephemeral=True)
+            return
+
+        view = discord.ui.View()
+
+        class DeleteSelect(discord.ui.Select):
+            def __init__(self):
+                options = [
+                    discord.SelectOption(label=item["label"], value=item["value"]) for item in data["items"]
+                ]
+                super().__init__(placeholder="削除する項目を選択", options=options, custom_id="delete_ticket")
+
+            async def callback(self, select_interaction: discord.Interaction):
+                selected_value = self.values[0]
+                data["items"] = [i for i in data["items"] if i["value"] != selected_value]
+                save_data(data)
+                await select_interaction.response.send_message(f"項目「{selected_value}」を削除しました。", ephemeral=True)
+
+        class OpenMsgButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label="オープンメッセージを設定", style=discord.ButtonStyle.primary)
+
+            async def callback(self, button_interaction: discord.Interaction):
+                await button_interaction.response.send_modal(OpenMessageModal(callback=self.set_open_message))
+
+            async def set_open_message(self, modal_interaction, title, description):
+                data["open_message"] = {"title": title, "description": description}
+                save_data(data)
+                await modal_interaction.response.send_message("オープンメッセージを保存しました。", ephemeral=True)
+
+        view.add_item(DeleteSelect())
+        view.add_item(OpenMsgButton())
+        await interaction.response.send_message("設定を選択してください：", view=view, ephemeral=True)
+
+    @app_commands.command(name="ticket_send", description="チケット作成パネルを送信")
+    async def ticket_send(self, interaction: discord.Interaction, title: str, description: str, staff_role: discord.Role, image: Optional[discord.Attachment] = None):
+        data = load_data()
+        items = data.get("items", [])
+        if not items:
+            await interaction.response.send_message("先に `/ticket_add` で項目を追加してください。", ephemeral=True)
+            return
+
+        embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
+        if image:
+            embed.set_image(url=image.url)
+
+        view = TicketView(items, staff_role)
+        await interaction.channel.send(embed=embed, view=view)
+        await interaction.response.send_message("チケットパネルを送信しました。", ephemeral=True)
+
+async def setup(bot):
+    await bot.add_cog(Ticket(bot))
+
+# Bot initialization
 intents = discord.Intents.default()
-intents.guilds = True
-
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
-
-# チケットカテゴリとロールの設定
-TICKET_CATEGORY_NAME = "チケット"
-SUPPORT_ROLE_NAME = "サポート"
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} がログインしました！')
+    print(f'{bot.user} has connected to Discord!')
     try:
         synced = await bot.tree.sync()
-        print(f'{len(synced)} 個のスラッシュコマンドを同期しました')
+        print(f'Synced {len(synced)} command(s)')
     except Exception as e:
-        print(f'コマンドの同期に失敗しました: {e}')
+        print(f'Failed to sync commands: {e}')
 
-# チケット作成ボタンのView
-class TicketCreateView(discord.ui.View):
-    def __init__(self, category_name=None):
-        super().__init__(timeout=None)
-        self.category_name = category_name or TICKET_CATEGORY_NAME
-
-    @discord.ui.button(label='🎫 チケットを作成', style=discord.ButtonStyle.primary, custom_id='create_ticket')
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        user = interaction.user
-        
-        # チケットカテゴリを取得または作成
-        category = discord.utils.get(guild.categories, name=self.category_name)
-        if not category:
-            category = await guild.create_category(self.category_name)
-        
-        # サポートロールを取得
-        support_role = discord.utils.get(guild.roles, name=SUPPORT_ROLE_NAME)
-        
-        # 既存のチケットをチェック
-        existing_channel = discord.utils.get(category.channels, name=f'ticket-{user.display_name}')
-        if existing_channel:
-            await interaction.response.send_message(
-                f'既にチケット {existing_channel.mention} が作成されています。',
-                ephemeral=True
-            )
-            return
-        
-        # チケットチャンネルの権限設定
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        }
-        
-        if support_role:
-            overwrites[support_role] = discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, read_message_history=True
-            )
-        
-        # チケットチャンネルを作成
-        channel = await category.create_text_channel(
-            name=f'ticket-{user.display_name}',
-            overwrites=overwrites
-        )
-        
-        # チケット管理ボタンを追加
-        ticket_view = TicketManageView()
-        
-        embed = discord.Embed(
-            title="🎫 新しいチケット",
-            description=f"{user.mention} さんのチケットが作成されました。\n\nお困りのことをこちらに記載してください。",
-            color=0x00ff00
-        )
-        embed.add_field(name="作成者", value=user.mention, inline=True)
-        embed.add_field(name="作成日時", value=discord.utils.format_dt(discord.utils.utcnow()), inline=True)
-        
-        await channel.send(embed=embed, view=ticket_view)
-        
-        await interaction.response.send_message(
-            f'チケット {channel.mention} が作成されました！',
-            ephemeral=True
-        )
-
-# チケット管理ボタンのView
-class TicketManageView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label='🔒 チケットを閉じる', style=discord.ButtonStyle.danger, custom_id='close_ticket')
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channel = interaction.channel
-        
-        # チケットチャンネルかどうかを確認
-        if not channel.name.startswith('ticket-'):
-            await interaction.response.send_message('このコマンドはチケットチャンネルでのみ使用できます。', ephemeral=True)
-            return
-        
-        embed = discord.Embed(
-            title="⚠️ チケットを閉じる確認",
-            description="本当にこのチケットを閉じますか？\n10秒後に自動的にキャンセルされます。",
-            color=0xff0000
-        )
-        
-        confirm_view = TicketCloseConfirmView()
-        await interaction.response.send_message(embed=embed, view=confirm_view)
-
-# チケット閉じる確認のView
-class TicketCloseConfirmView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=10)
-
-    @discord.ui.button(label='✅ 確認', style=discord.ButtonStyle.success, custom_id='confirm_close')
-    async def confirm_close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channel = interaction.channel
-        
-        embed = discord.Embed(
-            title="🔒 チケットが閉じられました",
-            description="5秒後にチャンネルが削除されます。",
-            color=0xff0000
-        )
-        
-        await interaction.response.edit_message(embed=embed, view=None)
-        await asyncio.sleep(5)
-        await channel.delete()
-
-    @discord.ui.button(label='❌ キャンセル', style=discord.ButtonStyle.secondary, custom_id='cancel_close')
-    async def cancel_close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="キャンセルされました",
-            description="チケットは開いたままです。",
-            color=0x808080
-        )
-        await interaction.response.edit_message(embed=embed, view=None)
-
-    async def on_timeout(self):
-        embed = discord.Embed(
-            title="タイムアウト",
-            description="操作がキャンセルされました。",
-            color=0x808080
-        )
-        # メッセージが存在する場合のみ編集
-        try:
-            await self.message.edit(embed=embed, view=None)
-        except:
-            pass
-
-# チケットパネルを作成するスラッシュコマンド
-@bot.tree.command(name='ticket_panel', description='チケット作成パネルを送信します')
-async def ticket_panel(interaction: discord.Interaction, category: str = None):
-    # 管理者権限をチェック
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message('このコマンドを実行する権限がありません。', ephemeral=True)
-        return
-    
-    category_name = category or TICKET_CATEGORY_NAME
-    
-    embed = discord.Embed(
-        title="🎫 チケットシステム",
-        description="サポートが必要な場合は、下のボタンをクリックしてチケットを作成してください。\n\n**注意事項:**\n• 1人につき1つのチケットまで作成できます\n• 不要になったチケットは必ず閉じてください",
-        color=0x0099ff
-    )
-    embed.add_field(name="カテゴリ", value=category_name, inline=True)
-    embed.set_footer(text="チケットbotへようこそ")
-    
-    view = TicketCreateView(category_name)
-    await interaction.response.send_message(embed=embed, view=view)
-
-# チケット情報を表示するスラッシュコマンド
-@bot.tree.command(name='ticket_info', description='現在のチケット情報を表示します')
-async def ticket_info(interaction: discord.Interaction, category: str = None):
-    guild = interaction.guild
-    category_name = category or TICKET_CATEGORY_NAME
-    category_obj = discord.utils.get(guild.categories, name=category_name)
-    
-    if not category_obj:
-        await interaction.response.send_message(f'チケットカテゴリ "{category_name}" が見つかりません。', ephemeral=True)
-        return
-    
-    ticket_channels = [ch for ch in category_obj.channels if ch.name.startswith('ticket-')]
-    
-    embed = discord.Embed(
-        title="📊 チケット情報",
-        color=0x0099ff
-    )
-    embed.add_field(name="アクティブなチケット数", value=len(ticket_channels), inline=True)
-    embed.add_field(name="カテゴリ", value=category_obj.name, inline=True)
-    
-    if ticket_channels:
-        ticket_list = "\n".join([f"• {ch.mention}" for ch in ticket_channels[:10]])
-        if len(ticket_channels) > 10:
-            ticket_list += f"\n... および他 {len(ticket_channels) - 10} 個"
-        embed.add_field(name="アクティブなチケット", value=ticket_list, inline=False)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# Renderでのヘルスチェック用のWebサーバー
+# Flask web server
 app = Flask(__name__)
 
 @app.route('/')
-def health_check():
-    return "Discord Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK"
+def home():
+    bot_status = "Online" if bot.is_ready() else "Offline"
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Discord Bot Status</title>
+        <meta charset="utf-8">
+        <style>
+            body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+            .status { font-size: 24px; margin: 20px; }
+            .online { color: green; }
+            .offline { color: red; }
+        </style>
+    </head>
+    <body>
+        <h1>Discord Bot Status</h1>
+        <div class="status {{ 'online' if status == 'Online' else 'offline' }}">
+            Status: {{ status }}
+        </div>
+        <p>Bot Name: {{ bot_name }}</p>
+    </body>
+    </html>
+    ''', status=bot_status, bot_name=bot.user.name if bot.user else "Unknown")
 
 def run_flask():
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-# Botを起動
-if __name__ == "__main__":
-    # 環境変数からBOTトークンを取得
-    token = os.getenv('DISCORD_TOKEN')
+async def main():
+    if not BOT_TOKEN:
+        print("エラー: BOT_TOKENが設定されていません。config.jsonにbot_tokenを追加してください。")
+        return
     
-    if not token:
-        print("エラー: BOTトークンが設定されていません。")
-        print("環境変数で DISCORD_TOKEN を設定してください。")
-    else:
-        # FlaskをバックグラウンドでRenderのため起動
-        flask_thread = Thread(target=run_flask)
-        flask_thread.daemon = True
-        flask_thread.start()
-        
-        # Discord botを起動
-        bot.run(token)
+    # Flask サーバーを別スレッドで起動
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    await setup(bot)
+    try:
+        await bot.start(BOT_TOKEN)
+    except KeyboardInterrupt:
+        print("Bot is shutting down...")
+    finally:
+        await bot.close()
+
+if __name__ == "__main__":
+    import asyncio
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Process interrupted")
