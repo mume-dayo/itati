@@ -6,7 +6,6 @@ from typing import Optional
 from flask import Flask, render_template_string
 import threading
 import asyncio
-
 # Bot configuration
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -59,12 +58,28 @@ class SupportSelect(discord.ui.Select):
         
         options = []
         for category in categories:
-            options.append(discord.SelectOption(
-                label=category["name"],
-                value=category["id"],
-                description=category["description"],
-                emoji=category["emoji"]
-            ))
+            # 絵文字の処理を改善
+            emoji = category.get("emoji", "🎫")
+            try:
+                # カスタム絵文字の場合の処理
+                if emoji.startswith("<") and emoji.endswith(">"):
+                    emoji = None  # カスタム絵文字はSelectOptionでは使用できない
+                
+                options.append(discord.SelectOption(
+                    label=category["name"],
+                    value=category["id"], 
+                    description=category["description"][:100],  # 説明文の長さ制限
+                    emoji=emoji
+                ))
+            except Exception as e:
+                print(f"絵文字エラー: {e}")
+                # 絵文字でエラーが発生した場合はデフォルト絵文字を使用
+                options.append(discord.SelectOption(
+                    label=category["name"],
+                    value=category["id"],
+                    description=category["description"][:100],
+                    emoji="🎫"
+                ))
         
         super().__init__(
             placeholder="サポートの種類を選択してください",
@@ -214,6 +229,14 @@ class SupportBot(commands.Cog):
     ):
         """Add a new support category"""
         category_id = str(len(support_data["categories"]) + 1)
+        
+        # 絵文字のバリデーション
+        if len(emoji) > 2 and not (emoji.startswith("<") and emoji.endswith(">")):
+            emoji = "🎫"  # 無効な絵文字の場合はデフォルトに
+        
+        # 説明文の長さ制限
+        if len(description) > 100:
+            description = description[:97] + "..."
         
         new_category = {
             "id": category_id,
