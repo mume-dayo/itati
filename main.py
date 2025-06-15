@@ -14,6 +14,8 @@ if not BOT_TOKEN:
     print("Secretsでkey=BOT_TOKEN, value=あなたのボットトークンを設定してください。")
     exit(1)
 
+print(f"🔑 BOT_TOKEN取得済み: {BOT_TOKEN[:20]}..." if BOT_TOKEN else "❌ BOT_TOKEN未設定")
+
 # In-memory data storage
 support_data = {
     "categories": [],
@@ -201,7 +203,7 @@ class SupportBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
     
-    @app_commands.command(name="support_add", description="新しいサポートカテゴリを追加")
+    @app_commands.command(name="ticket_add", description="新しいサポートカテゴリを追加")
     async def add_support_category(
         self,
         interaction: discord.Interaction,
@@ -228,7 +230,7 @@ class SupportBot(commands.Cog):
             ephemeral=True
         )
     
-    @app_commands.command(name="support_panel", description="サポートパネルを設置")
+    @app_commands.command(name="ticket_panel", description="サポートパネルを設置")
     async def create_support_panel(
         self,
         interaction: discord.Interaction,
@@ -259,7 +261,7 @@ class SupportBot(commands.Cog):
         await interaction.channel.send(embed=embed, view=view)
         await interaction.response.send_message("✅ サポートパネルを設置しました。", ephemeral=True)
     
-    @app_commands.command(name="support_manage", description="サポート設定を管理")
+    @app_commands.command(name="ticket_manage", description="サポート設定を管理")
     async def manage_support(self, interaction: discord.Interaction):
         """Manage support settings"""
         if not support_data["categories"]:
@@ -300,7 +302,7 @@ class SupportBot(commands.Cog):
 # Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 @bot.event
 async def on_ready():
